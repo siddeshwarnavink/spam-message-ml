@@ -6,8 +6,8 @@
 #define BUFFER_SIZE 256
 
 typedef struct {
-  char **array;    
-  size_t size;  
+  char **array;
+  size_t size;
   size_t capacity;
 } da_string;
 
@@ -40,30 +40,61 @@ void da_string_append(da_string *arr, const char *str) {
 }
 
 void da_string_free(da_string *arr) {
-  for (size_t i = 0; i < arr->size; i++) {
-    free(arr->array[i]); 
+  for (size_t i = 0; i < arr->size; ++i) {
+    free(arr->array[i]);
   }
-  free(arr->array); 
+  free(arr->array);
   arr->array = NULL;
   arr->size = 0;
   arr->capacity = 0;
 }
 
 void da_string_print(da_string *arr) {
-  for (size_t i = 0; i < arr->size; i++) {
+  for (size_t i = 0; i < arr->size; ++i) {
     printf("%s\n", arr->array[i]);
   }
 }
 
+void get_stop_words(da_string *words) {
+  FILE *file;
+  char buf[BUFFER_SIZE];
+
+  file = fopen("dataset/stop-words.txt", "r");
+  if (file == NULL) {
+    perror("Error opening file");
+    exit(1);
+  }
+
+  while (fgets(buf, BUFFER_SIZE, file) != NULL) {
+    buf[strlen(buf) - 1] = '\0';
+    da_string_append(words, buf);
+  }
+
+  fclose(file);
+}
+
+bool accept_string(da_string *stop_words, char *str) {
+  for(size_t i = 0; i < stop_words->size; ++i) {
+    if(strcmp(stop_words->array[i], str) == 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
 int main() {
   char buf[BUFFER_SIZE];
-  const char input[] = "why did the chicken cross the road?";
+  const char input[] = "don't change the following piece of code, it is used to evaluate your regex";
   size_t j = 0;
 
-  da_string tokens;
-  da_string_init(&tokens, 256);
+  da_string stop_words;
+  da_string_init(&stop_words, 256);
+  get_stop_words(&stop_words);
 
-  for(size_t i = 0; i < strlen(input); ++i) {
+  da_string tokens;
+  da_string_init(&tokens, 8);
+
+  for(size_t i = 0; i < strlen(input) && j <= BUFFER_SIZE; ++i) {
     switch(input[i]) {
       case '.':
       case ',':
@@ -74,7 +105,9 @@ int main() {
         break;
       case ' ':
         buf[j] = '\0';
-        da_string_append(&tokens, buf);
+        if(accept_string(&stop_words, buf)) {
+          da_string_append(&tokens, buf);
+        }
         j = 0;
         break;
       default:
@@ -84,7 +117,9 @@ int main() {
   }
 
   buf[j] = '\0';
-  da_string_append(&tokens, buf);
+  if(accept_string(&stop_words, buf)) {
+    da_string_append(&tokens, buf);
+  }
 
   da_string_print(&tokens);
   da_string_free(&tokens);
