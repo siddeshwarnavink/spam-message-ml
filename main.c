@@ -82,9 +82,39 @@ bool accept_string(da_string *stop_words, char *str) {
   return true;
 }
 
+void add_string_to_tokens(da_string *tokens, const char *str) {
+  char buf[BUFFER_SIZE];
+  size_t str_len = strlen(str);
+  size_t j = 0;
+
+  for(size_t i = 0; i < str_len; ++i) {
+    if(str[i] == '\'') {
+      bool next_char_safe = i + 1 < str_len;
+      bool next_2char_safe = i + 2 < str_len;
+
+      // n't
+      if(str[i - 1] == 'n' && next_char_safe && str[i + 1] == 't') {
+        buf[--j] = '\0';
+        break;
+      }
+      else if((next_2char_safe && str[i + 1] == 'r' && str[i + 2] == 'e') // 're
+              || (next_2char_safe && str[i + 1] == 'v' && str[i + 2] == 'e') // 've
+              || (next_2char_safe && str[i + 1] == 'l' && str[i + 2] == 'l') // 'll
+              || (next_char_safe && str[i + 1] == 'd') // 'd
+              || (next_char_safe && str[i + 1] == 's')) { // 's
+        break;
+      }
+    }
+    buf[j++] = str[i];
+  }
+
+  buf[j] = '\0';
+  da_string_append(tokens, buf);
+}
+
 int main() {
   char buf[BUFFER_SIZE];
-  const char input[] = "don't change the following piece of code, it is used to evaluate your regex";
+  const char input[] = "don't change the following piece of code, they're used to evaluate your regex";
   size_t j = 0;
 
   da_string stop_words;
@@ -92,7 +122,7 @@ int main() {
   get_stop_words(&stop_words);
 
   da_string tokens;
-  da_string_init(&tokens, 8);
+  da_string_init(&tokens, 16);
 
   for(size_t i = 0; i < strlen(input) && j <= BUFFER_SIZE; ++i) {
     switch(input[i]) {
@@ -106,7 +136,7 @@ int main() {
       case ' ':
         buf[j] = '\0';
         if(accept_string(&stop_words, buf)) {
-          da_string_append(&tokens, buf);
+          add_string_to_tokens(&tokens, buf);
         }
         j = 0;
         break;
@@ -118,7 +148,7 @@ int main() {
 
   buf[j] = '\0';
   if(accept_string(&stop_words, buf)) {
-    da_string_append(&tokens, buf);
+    add_string_to_tokens(&tokens, buf);
   }
 
   da_string_print(&tokens);

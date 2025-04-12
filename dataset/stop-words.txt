@@ -22,6 +22,7 @@ between
 both
 but
 by
+cannot
 could
 did
 do
@@ -70,6 +71,7 @@ once
 only
 or
 other
+ought
 our
 ours
 ourselves
@@ -114,6 +116,7 @@ who
 whom
 why
 with
+will
 would
 you
 your
