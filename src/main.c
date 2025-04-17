@@ -26,8 +26,6 @@ typedef struct ht_string_bool_node {
 
 typedef struct item {
   float **tokens; // NULL-terminated float* array
-  float **weights; // NULL-terminated float* array
-  float bias;
   bool is_spam;
 } item;
 
@@ -225,24 +223,11 @@ void load_csv_dataset(ht_string *dataset_table, ht_string *token_table, ht_strin
 
     if(tokens.size > 0) {
       item *new_item = malloc(sizeof(struct item));
-      new_item->bias = 0.0f;
       new_item->is_spam = is_spam;
 
       ht_string_item_node *item_node = ht_node_create(text, new_item, ht_string_item_node);
 
-      da_float_ptr empty_weights;
-      da_init(&empty_weights, 32, float *);
-
       da_to_array(&tokens, item_node->value->tokens, float *); // Store static NULL-terminating array of tokens.
-
-      for(size_t i = 0; i < tokens.size; ++i) {
-        float *val = malloc(sizeof(float));
-        *val = 0.0f;
-        da_append(&empty_weights, val);
-      }
-      da_to_array(&empty_weights, item_node->value->weights, float *); // Store static NULL-terminating array of weights.
-
-      da_free_da_alone(&empty_weights);
       da_free_da_alone(&tokens);
 
       ht_insert(items_table, item_node);
@@ -256,34 +241,18 @@ void load_csv_dataset(ht_string *dataset_table, ht_string *token_table, ht_strin
 
 // ---------- Main program  ----------
 
-void print_item(item *itm) {
-  printf("----------\n");
-  printf("weights = [");
-  for(size_t i = 0; itm->weights[i] != NULL; ++i) {
-    printf("%f,", *itm->weights[i]);
-  }
-  printf("NULL]\n");
-  printf("bias = %f\n", itm->bias);
-}
-
 void free_item(void *value) {
   item *itm = (item *)value;
-
   assert(itm);
-  assert(itm->weights);
   assert(itm->tokens);
-
-  for(size_t i = 0; itm->tokens[i] != NULL; ++i) {
-    free(itm->weights[i]);
-  }
-
   free(itm->tokens);
-  free(itm->weights);
   free(itm);
 }
 
 #define LEARNING_RATE 0.01
-#define EPOCHS 1000
+#define EPOCHS 100000
+#define MAX_TOKENS_LENGTH 16
+#define TRAIN_TEST_SPLIT 75 // Percent of data to train. Rest will be used for testing.
 
 float sigmoidf(float x) {
   return 1.0f / (1.0f + expf(-x));
@@ -308,39 +277,45 @@ int main() {
       current->value = current->value / (float)token_value_table.size;
     });
 
-  for(size_t x = 1; x <= EPOCHS; ++x) {
-    int correctly_predicted = 0;
+  // Initialize weights and bias
+  float weights[MAX_TOKENS_LENGTH];
+  for(size_t i = 0; i < MAX_TOKENS_LENGTH; ++i)
+    weights[i] = 0.0f;
+  float bias = 0.0f;
 
+  size_t correctly_predicted = 0;
+  const size_t train_size = TRAIN_TEST_SPLIT * ((float)items_table.size / 100.0f);
+  const size_t test_size = items_table.size - train_size;
+
+  for(size_t x = 1; x <= EPOCHS; ++x) {
     ht_foreach(items_table, ht_string_item_node, {
         item *itm = current->value;
-        // print_item(itm);
-
         float z = 0.0f;
-        for(size_t i = 0; itm->tokens[i] != NULL; ++i) {
-          assert(itm->weights[i]);
-          z += (*itm->tokens[i]) * (*itm->weights[i]);
-        }
-        z += itm->bias;
+        for(size_t i = 0; itm->tokens[i] != NULL; ++i)
+          z += (*itm->tokens[i]) * weights[i];
+        z += bias;
 
         float y_cap = sigmoidf(z); // Classification predicted by the model.
-        if((itm->is_spam && y_cap > 0.5f) || (!itm->is_spam && y_cap < 0.5f)) {
+        float y = itm->is_spam ? 1.0f : 0.0f; // Actual value.
+
+        if(x <= train_size) {
+          float bias_gradient = y_cap - y;
+          for(size_t i = 0; itm->tokens[i] != NULL; ++i) {
+            float weight_gradient = bias_gradient * *itm->tokens[i];
+            weights[i] -= LEARNING_RATE * weight_gradient;
+          }
+          bias -= LEARNING_RATE * bias_gradient;
+        } else if((itm->is_spam && y_cap > 0.5f) || (!itm->is_spam && y_cap < 0.5f)) {
           ++correctly_predicted;
         }
-
-        float y = itm->is_spam ? 1.0f : 0.0f; // Actual value.
-        float bias_gradient = y_cap - y;
-
-        for(size_t i = 0; itm->tokens[i] != NULL; ++i) {
-          assert(itm->weights[i]);
-          float weight_gradient = bias_gradient * *itm->tokens[i];
-          *itm->weights[i] -= LEARNING_RATE * weight_gradient;
-        }
-        itm->bias -= LEARNING_RATE * bias_gradient;
       });
-
-    float accuracy = ((float)correctly_predicted / (float)items_table.size) * 100.0f;
-    printf("Accuracy: %f\n", accuracy);
   }
+
+  const float accuracy = ((float)correctly_predicted / (float)(items_table.size * EPOCHS)) * 100.0f;
+  printf("Train size: %zu\n", train_size);
+  printf("Test size: %zu\n", test_size);
+  printf("Correctly Predicted: %zu\n", correctly_predicted);
+  printf("Accuracy: %f\n", accuracy);
 
   ht_free(&token_value_table, ht_string_float_node);
   ht_free(&classification_table, ht_string_bool_node);
