@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <assert.h>
 #include <math.h>
+#include <unistd.h>
 
 #include "./da.h"
 #include "./ht.h"
@@ -143,44 +144,43 @@ void add_tokens_to_table(ht_string *token_table, da_float_ptr *tokens, const cha
 }
 
 /*
- * The goal of this function is to assign each word of the input string a unique
- * floating value called token.
+ * This macro extracts token word from raw input string and allows you to
+ * perform action for each word.
  */
-void nlp_process_string(char *input, da_string *stop_words, ht_string *token_table, da_float_ptr *tokens) {
-  char buf[SMALL_BUFFER_SIZE];
-  size_t j = 0;
+#define extract_token_words(input, stop_words, body) do {               \
+    char buf[SMALL_BUFFER_SIZE];                                        \
+    size_t j = 0;                                                       \
+    for(size_t i = 0; i < strlen(input) && j <= SMALL_BUFFER_SIZE; ++i) { \
+      switch(input[i]) {                                                \
+      case '.':                                                         \
+      case ',':                                                         \
+      case '?':                                                         \
+      case '!':                                                         \
+      case ':':                                                         \
+      case '"':                                                         \
+        continue;                                                       \
+        break;                                                          \
+      case ' ':                                                         \
+      case '(':                                                         \
+      case ')':                                                         \
+        buf[j] = '\0';                                                  \
+        if(accept_string(stop_words, buf)) {                            \
+          body;                                                         \
+        }                                                               \
+        j = 0;                                                          \
+        break;                                                          \
+      default:                                                          \
+        if (!isdigit(input[i]) && (i - 1 >= 0 && input[i] != input[i - 1])) \
+          buf[j++] = input[i];                                          \
+        break;                                                          \
+      }                                                                 \
+    }                                                                   \
+    buf[j] = '\0';                                                      \
+    if(accept_string(stop_words, buf)) {                                \
+      body;                                                             \
+    }                                                                   \
+  } while(0)
 
-  for(size_t i = 0; i < strlen(input) && j <= SMALL_BUFFER_SIZE; ++i) {
-    switch(input[i]) {
-    case '.':
-    case ',':
-    case '?':
-    case '!':
-    case ':':
-    case '"':
-      continue;
-      break;
-    case ' ':
-    case '(':
-    case ')':
-      buf[j] = '\0';
-      if(accept_string(stop_words, buf)) {
-        add_tokens_to_table(token_table, tokens, str_lwr(buf));
-      }
-      j = 0;
-      break;
-    default:
-      if (!isdigit(input[i]) && (i - 1 >= 0 && input[i] != input[i - 1]))
-        buf[j++] = input[i];
-      break;
-    }
-  }
-
-  buf[j] = '\0';
-  if(accept_string(stop_words, buf)) {
-    add_tokens_to_table(token_table, tokens, str_lwr(buf));
-  }
-}
 
 // ---------- CSV parser  ----------
 
@@ -188,11 +188,11 @@ void nlp_process_string(char *input, da_string *stop_words, ht_string *token_tab
  * Load the spam words dataset into the hash table and generate tokens for the
  * words in data set.
  */
-void load_csv_dataset(ht_string *dataset_table, ht_string *token_table, ht_string *items_table, da_string *stop_words) {
+void load_csv_dataset(char *path, ht_string *dataset_table, ht_string *token_table, ht_string *items_table, da_string *stop_words) {
   FILE *file;
   char buf[BIG_BUFFER_SIZE];
 
-  file = fopen("dataset/spam.csv", "r");
+  file = fopen(path, "r");
   if (file == NULL) {
     perror("Error opening file");
     exit(1);
@@ -219,7 +219,11 @@ void load_csv_dataset(ht_string *dataset_table, ht_string *token_table, ht_strin
 
     da_float_ptr tokens;
     da_init(&tokens, 32, float *);
-    nlp_process_string(text, stop_words, token_table, &tokens);
+
+    extract_token_words(text, stop_words, {
+        add_tokens_to_table(token_table, &tokens, str_lwr(buf));
+      });
+
 
     if(tokens.size > 0) {
       item *new_item = malloc(sizeof(struct item));
@@ -250,15 +254,98 @@ void free_item(void *value) {
 }
 
 #define LEARNING_RATE 0.01
-#define EPOCHS 100000
-#define MAX_TOKENS_LENGTH 16
-#define TRAIN_TEST_SPLIT 75 // Percent of data to train. Rest will be used for testing.
+#define EPOCHS 10000
+#define MAX_TOKENS_COUNT 7240 // Actual max value is 7205
+#define MAX_TOKENS_LENGTH 24  // Actual max value ia 16
+#define TRAIN_TEST_SPLIT 75   // Percent of data to train. Rest will be used for testing.
+
+typedef struct model {
+  float weights[MAX_TOKENS_LENGTH];
+  float bias;
+  char tok_str[MAX_TOKENS_COUNT][SMALL_BUFFER_SIZE];
+  float tok_val[MAX_TOKENS_COUNT];
+} model;
+
+void load_model(model *m, const char *path) {
+  FILE *file = fopen(path, "rb");
+  if (!file) {
+    perror("Failed to open file for reading");
+    exit(EXIT_FAILURE);
+  }
+
+  if (fread(m->tok_str, sizeof(char), MAX_TOKENS_COUNT * SMALL_BUFFER_SIZE, file) != MAX_TOKENS_COUNT * SMALL_BUFFER_SIZE) {
+    perror("Failed to read token strings");
+    exit(EXIT_FAILURE);
+  }
+  if (fread(m->tok_val, sizeof(float), MAX_TOKENS_COUNT, file) != MAX_TOKENS_COUNT) {
+    perror("Failed to read token values");
+    exit(EXIT_FAILURE);
+  }
+  if (fread(m->weights, sizeof(float), MAX_TOKENS_LENGTH, file) != MAX_TOKENS_LENGTH) {
+    perror("Failed to read weights");
+    exit(EXIT_FAILURE);
+  }
+  if (fread(&m->bias, sizeof(float), 1, file) != 1) {
+    perror("Failed to read bias");
+    exit(EXIT_FAILURE);
+  }
+
+  fclose(file);
+}
+
+/*
+ * Dump the model into a file.
+ */
+void dump_model(model *m, const char *path) {
+  FILE *file = fopen(path, "wb");
+  if (!file) {
+    perror("Failed to open file for writing");
+    exit(EXIT_FAILURE);
+  }
+
+  if (fwrite(m->tok_str, sizeof(char), MAX_TOKENS_COUNT * SMALL_BUFFER_SIZE, file) != MAX_TOKENS_COUNT * SMALL_BUFFER_SIZE) {
+    perror("Failed to write token strings");
+    exit(EXIT_FAILURE);
+  }
+  if (fwrite(m->tok_val, sizeof(float), MAX_TOKENS_COUNT, file) != MAX_TOKENS_COUNT) {
+    perror("Failed to write token values");
+    exit(EXIT_FAILURE);
+  }
+  if (fwrite(m->weights, sizeof(float), MAX_TOKENS_LENGTH, file) != MAX_TOKENS_LENGTH) {
+    perror("Failed to write weights");
+    exit(EXIT_FAILURE);
+  }
+  if (fwrite(&m->bias, sizeof(float), 1, file) != 1) {
+    perror("Failed to write bias");
+    exit(EXIT_FAILURE);
+  }
+
+  printf("Model saved to %s\n", path);
+  fclose(file);
+}
 
 float sigmoidf(float x) {
   return 1.0f / (1.0f + expf(-x));
 }
 
-int main() {
+void print_help(char *prog) {
+  printf("Usage: %s [OPTION]...\n", prog);
+  printf("Train spam message detechtion machine learning model\n");
+  printf("Example: %s -t -o model.bin\n", prog);
+
+  printf("\nModel training:\n");
+  printf("  -t, --train     Train the machine learning model.\n");
+  printf("  -o, --output    Output file path where the model has to be stored.\n");
+  printf("  -d, --dataset   Path to dataset file.\n");
+
+  printf("\nRun model:\n");
+  printf("  -r, --run       Run pre-trained model.\n");
+  printf("  -m, --model     Path to model file.\n");
+  printf("  -i, --input     Input string for the model.\n");
+}
+
+void train_model(char *dataset, char *output) {
+  model m;
   ht_string token_value_table, classification_table, items_table;
   ht_init(&token_value_table, 128, ht_string_float_node);
   ht_init(&classification_table, 256, ht_string_bool_node);
@@ -268,7 +355,7 @@ int main() {
   da_init(&stop_words, 128, char *);
   get_stop_words(&stop_words);
 
-  load_csv_dataset(&classification_table, &token_value_table, &items_table, &stop_words);
+  load_csv_dataset(dataset, &classification_table, &token_value_table, &items_table, &stop_words);
 
   da_free(&stop_words);
 
@@ -278,22 +365,22 @@ int main() {
     });
 
   // Initialize weights and bias
-  float weights[MAX_TOKENS_LENGTH];
   for(size_t i = 0; i < MAX_TOKENS_LENGTH; ++i)
-    weights[i] = 0.0f;
-  float bias = 0.0f;
+    m.weights[i] = 0.0f;
+  m.bias = 0.0f;
 
-  size_t correctly_predicted = 0;
+  size_t correctly_predicted;
   const size_t train_size = TRAIN_TEST_SPLIT * ((float)items_table.size / 100.0f);
   const size_t test_size = items_table.size - train_size;
 
   for(size_t x = 1; x <= EPOCHS; ++x) {
+    correctly_predicted = 0;
     ht_foreach(items_table, ht_string_item_node, {
         item *itm = current->value;
         float z = 0.0f;
         for(size_t i = 0; itm->tokens[i] != NULL; ++i)
-          z += (*itm->tokens[i]) * weights[i];
-        z += bias;
+          z += (*itm->tokens[i]) * m.weights[i];
+        z += m.bias;
 
         float y_cap = sigmoidf(z); // Classification predicted by the model.
         float y = itm->is_spam ? 1.0f : 0.0f; // Actual value.
@@ -302,24 +389,160 @@ int main() {
           float bias_gradient = y_cap - y;
           for(size_t i = 0; itm->tokens[i] != NULL; ++i) {
             float weight_gradient = bias_gradient * *itm->tokens[i];
-            weights[i] -= LEARNING_RATE * weight_gradient;
+            m.weights[i] -= LEARNING_RATE * weight_gradient;
           }
-          bias -= LEARNING_RATE * bias_gradient;
+          m.bias -= LEARNING_RATE * bias_gradient;
         } else if((itm->is_spam && y_cap > 0.5f) || (!itm->is_spam && y_cap < 0.5f)) {
           ++correctly_predicted;
         }
       });
   }
 
-  const float accuracy = ((float)correctly_predicted / (float)(items_table.size * EPOCHS)) * 100.0f;
+  const float accuracy = (float)correctly_predicted / (float)items_table.size * 100.0f;
   printf("Train size: %zu\n", train_size);
   printf("Test size: %zu\n", test_size);
   printf("Correctly Predicted: %zu\n", correctly_predicted);
   printf("Accuracy: %f\n", accuracy);
 
+  // Dump model to file
+  if(output != NULL) {
+    // Copy token values.
+    size_t j = 0;
+    ht_foreach(token_value_table, ht_string_float_node, {
+        strncpy(m.tok_str[j], current->key, SMALL_BUFFER_SIZE);
+        m.tok_val[j] = current->value;
+        ++j;
+      });
+
+    dump_model(&m, output);
+  }
+
   ht_free(&token_value_table, ht_string_float_node);
   ht_free(&classification_table, ht_string_bool_node);
   ht_free2(&items_table, ht_string_item_node, free_item);
+}
+
+void run_model(char *path, char *input) {
+  bool should_free = false;
+  if(input == NULL) {
+    char buf[120];
+    printf("Enter model input: ");
+    fflush(stdout);
+    if(read(0, buf, 120) == -1) {
+      printf("Failed to read user input from stdin.");
+      exit(1);
+    }
+
+    input = (char *)malloc(strlen(buf) + 1);
+    if (input == NULL) {
+      printf("Memory allocation failed.\n");
+      exit(EXIT_FAILURE);
+    }
+    strcpy(input, buf);
+    should_free = true;
+  }
+
+  da_string stop_words;
+  da_init(&stop_words, 128, char *);
+  get_stop_words(&stop_words);
+
+  model m;
+  load_model(&m, path);
+
+  da_float_ptr tokens;
+  da_init(&tokens, 32, float *);
+
+  ht_string token_value_table;
+  ht_init(&token_value_table, 128, ht_string_float_node);
+
+  for(size_t i = 0; i < MAX_TOKENS_COUNT; ++i) {
+    ht_string_float_node *node = ht_node_create(m.tok_str[i], m.tok_val[i], ht_string_float_node);
+    ht_insert(&token_value_table, node);
+  }
+
+  extract_token_words(input, &stop_words, {
+      float *token_value = (float *)ht_retrive(&token_value_table, str_lwr(buf), ht_string_float_node);
+      if(token_value != NULL) {
+        da_append(&tokens, token_value);
+      }
+    });
+
+  float z = 0.0f;
+  for(size_t i = 0; i < tokens.size; ++i) {
+    z += *tokens.array[i] * m.weights[i];
+  }
+  z += m.bias;
+  float y_cap = sigmoidf(z);
+
+  if(y_cap > 0.5) {
+    printf("It is spam.\n");
+  } else {
+    printf("It not a spam.\n");
+  }
+
+  if(should_free) free(input);
+  da_free(&stop_words);
+  da_free_da_alone(&tokens);
+  ht_free(&token_value_table, ht_string_float_node);
+}
+
+enum action {
+  UNKNOWN,
+  HELP,
+  TRAIN,
+  RUN
+};
+
+int main(int argc, char *argv[]) {
+  char *dataset = "dataset/spam.csv";
+  char *model = "model.bin";
+  char *input = NULL;
+  enum action a = UNKNOWN;
+
+  if (argc > 1) {
+    for(size_t x = 1; x < argc; ++x) {
+      if(strcmp(argv[x], "-h") == 0 || strcmp(argv[x], "--help") == 0) {
+        a = HELP;
+        break;
+      } else if (strcmp(argv[x], "-t") == 0 || strcmp(argv[x], "--train") == 0) {
+        a = TRAIN;
+      } else if (strcmp(argv[x], "-o") == 0 || strcmp(argv[x], "--output") == 0) {
+        if(x+1 < argc && argv[x+1][0] != '-') {
+          model = argv[x+1];
+        }
+      } else if (strcmp(argv[x], "-d") == 0 || strcmp(argv[x], "--dataset") == 0) {
+        if(x+1 < argc && argv[x+1][0] != '-') {
+          dataset = argv[x+1];
+        }
+      } else if (strcmp(argv[x], "-r") == 0 || strcmp(argv[x], "--run") == 0) {
+        a = RUN;
+      } else if (strcmp(argv[x], "-m") == 0 || strcmp(argv[x], "--model") == 0) {
+        if(x+1 < argc && argv[x+1][0] != '-') {
+          model = argv[x+1];
+        }
+      } else if (strcmp(argv[x], "-i") == 0 || strcmp(argv[x], "--input") == 0) {
+        if(x+1 < argc && argv[x+1][0] != '-') {
+          input = argv[x+1];
+        }
+      }
+    }
+  }
+
+  switch(a) {
+  case HELP:
+    print_help(argv[0]);
+    break;
+  case TRAIN:
+    train_model(dataset, model);
+    break;
+  case RUN:
+    run_model(model, input);
+    break;
+  default:
+    printf("Usage: %s [OPTION]...\n", argv[0]);
+    printf("Try '%s --help' for more information.\n", argv[0]);
+    return 1;
+  }
 
   return 0;
 }

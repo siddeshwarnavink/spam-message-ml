@@ -1,2 +1,3 @@
 .build/
 dataset/spam.csv
+*.bin
