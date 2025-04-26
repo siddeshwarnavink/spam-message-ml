@@ -6,12 +6,31 @@
 #include <assert.h>
 #include <math.h>
 #include <unistd.h>
+#include <stdint.h>
 
-#include "./da.h"
-#include "./ht.h"
+#define STB_DS_IMPLEMENTATION
+#include "stb_ds.h"
+
+// ---------- Configuration ----------
 
 #define SMALL_BUFFER_SIZE 64
 #define BIG_BUFFER_SIZE 256
+
+#define VOCABULARY_SIZE 33643 // No. of unique tokens in dataset.
+#define LEARNING_RATE 0.01
+#define EPOCHS 10
+#define TRAIN_TEST_SPLIT 75   // Percent of data to train. Rest will be used for testing.
+
+/*
+#define MAX_TOKENS_COUNT 7240 // Actual max value is 7205
+#define MAX_TOKENS_LENGTH 24  // Actual max value ia 16
+*/
+
+typedef struct ht_string_uint_node {
+  char *key;
+  size_t value;
+  struct ht_string_uint_node *next;
+} ht_string_uint_node;
 
 typedef struct ht_string_float_node {
   char *key;
@@ -26,15 +45,37 @@ typedef struct ht_string_bool_node {
 } ht_string_bool_node;
 
 typedef struct item {
-  float **tokens; // NULL-terminated float* array
+  char *text;
   bool is_spam;
+  float values[VOCABULARY_SIZE];
 } item;
+
+/*
+typedef struct {
+  item **array;
+  size_t size;
+  size_t capacity;
+} da_item;
 
 typedef struct ht_string_item_node {
   char *key;
   item *value;
   struct ht_string_item_node *next;
 } ht_string_item_node;
+*/
+
+typedef struct vocabulary_data {
+  size_t index;
+  size_t count;
+} vocabulary_data;
+
+/*
+typedef struct ht_string_vocabulary_data_node {
+  char *key;
+  vocabulary_data *value;
+  struct ht_string_vocabulary_data_node *next;
+} ht_string_vocabulary_data_node;
+*/
 
 // ---------- String functions ----------
 
@@ -68,9 +109,9 @@ char *str_remove_first_chars(char *str, int n) {
 // ---------- NLP ----------
 
 /*
- * Loads the list of stop words in English into given dynamic array.
+ * Loads the list of stop words in English into the given dynamic array.
  */
-void get_stop_words(da_string *words) {
+void get_stop_words(char ***words) {
   FILE *file;
   char buf[SMALL_BUFFER_SIZE];
 
@@ -81,66 +122,27 @@ void get_stop_words(da_string *words) {
   }
 
   while (fgets(buf, SMALL_BUFFER_SIZE, file) != NULL) {
-    buf[strlen(buf) - 1] = '\0';
-    da_append(words, buf);
+    buf[strcspn(buf, "\r\n")] = '\0'; // Remove newline or carriage return
+    arrput(*words, strdup(buf));     // Add a copy of the string to the dynamic array
   }
 
   fclose(file);
 }
 
 /*
- * Checks weather the word is a valid token, the word should be of length 3-12
+ * Checks whether the word is a valid token. The word should be of length 3-12
  * and should not be a stop word.
  */
-bool accept_string(da_string *stop_words, char *str) {
+bool accept_string(char ***stop_words, char *str) {
   size_t str_len = strlen(str);
-  if(str_len <= 3 || str_len > 12) return false;
+  if (str_len < 3 || str_len > 12) return false;
 
-  for(size_t i = 0; i < stop_words->size; ++i) {
-    if(strcmp(stop_words->array[i], str) == 0) {
+  for (size_t i = 0; i < arrlenu(*stop_words); ++i) {
+    if (strcmp((*stop_words)[i], str) == 0) {
       return false;
     }
   }
   return true;
-}
-
-/*
- * Try to expand apostrophe words, assign unique numbers to the tokens, and add
- * them to the hash table and pointers to the value in hash table to dynamic
- * array.
- */
-void add_tokens_to_table(ht_string *token_table, da_float_ptr *tokens, const char *str) {
-  char buf[SMALL_BUFFER_SIZE];
-  size_t str_len = strlen(str);
-  size_t j = 0;
-
-  for(size_t i = 0; i < str_len; ++i) {
-    if(str[i] == '\'') {
-      bool next_char_safe = i + 1 < str_len;
-      bool next_2char_safe = i + 2 < str_len;
-
-      // n't
-      if(str[i - 1] == 'n' && next_char_safe && str[i + 1] == 't') {
-        buf[--j] = '\0';
-        break;
-      }
-      else if((next_2char_safe && str[i + 1] == 'r' && str[i + 2] == 'e')    // 're
-              || (next_2char_safe && str[i + 1] == 'v' && str[i + 2] == 'e') // 've
-              || (next_2char_safe && str[i + 1] == 'l' && str[i + 2] == 'l') // 'll
-              || (next_char_safe && str[i + 1] == 'd')                       // 'd
-              || (next_char_safe && str[i + 1] == 's')) {                    // 's
-        break;
-      }
-    }
-    buf[j++] = str[i];
-  }
-
-  buf[j] = '\0';
-  if((float *)ht_retrive(token_table, buf, ht_string_float_node) == NULL) {
-    ht_string_float_node *node = ht_node_create(buf, (float)token_table->size + 1, ht_string_float_node);
-    ht_insert(token_table, node);
-    da_append(tokens, &node->value);
-  }
 }
 
 /*
@@ -149,9 +151,9 @@ void add_tokens_to_table(ht_string *token_table, da_float_ptr *tokens, const cha
  */
 #define extract_token_words(input, stop_words, body) do {               \
     char buf[SMALL_BUFFER_SIZE];                                        \
-    size_t j = 0;                                                       \
-    for(size_t i = 0; i < strlen(input) && j <= SMALL_BUFFER_SIZE; ++i) { \
-      switch(input[i]) {                                                \
+    size_t extract_token_words_j = 0;                                   \
+    for (size_t extract_token_words_i = 0; extract_token_words_i < strlen(input) && extract_token_words_j < SMALL_BUFFER_SIZE - 1; ++extract_token_words_i) { \
+      switch(input[extract_token_words_i]) {                            \
       case '.':                                                         \
       case ',':                                                         \
       case '?':                                                         \
@@ -163,88 +165,27 @@ void add_tokens_to_table(ht_string *token_table, da_float_ptr *tokens, const cha
       case ' ':                                                         \
       case '(':                                                         \
       case ')':                                                         \
-        buf[j] = '\0';                                                  \
+        buf[extract_token_words_j] = '\0';                              \
         if(accept_string(stop_words, buf)) {                            \
           body;                                                         \
         }                                                               \
-        j = 0;                                                          \
+        extract_token_words_j = 0;                                      \
         break;                                                          \
       default:                                                          \
-        if (!isdigit(input[i]) && (i - 1 >= 0 && input[i] != input[i - 1])) \
-          buf[j++] = input[i];                                          \
+        if (!isdigit(input[extract_token_words_i]) && input[extract_token_words_i] != input[extract_token_words_i - 1]) \
+          buf[extract_token_words_j++] = input[extract_token_words_i];  \
         break;                                                          \
       }                                                                 \
     }                                                                   \
-    buf[j] = '\0';                                                      \
-    if(accept_string(stop_words, buf)) {                                \
+    buf[extract_token_words_j] = '\0';                                  \
+    if (extract_token_words_j > 0 && accept_string(stop_words, buf)) {  \
       body;                                                             \
     }                                                                   \
   } while(0)
 
-
-// ---------- CSV parser  ----------
-
-/*
- * Load the spam words dataset into the hash table and generate tokens for the
- * words in data set.
- */
-void load_csv_dataset(char *path, ht_string *dataset_table, ht_string *token_table, ht_string *items_table, da_string *stop_words) {
-  FILE *file;
-  char buf[BIG_BUFFER_SIZE];
-
-  file = fopen(path, "r");
-  if (file == NULL) {
-    perror("Error opening file");
-    exit(1);
-  }
-
-  while (fgets(buf, BIG_BUFFER_SIZE, file) != NULL) {
-    buf[strlen(buf) - 1] = '\0';
-    bool is_spam = true;
-    switch(buf[0]) {
-    case 'h': // "ham"
-      is_spam = false;
-      break;
-    case 's': // "spam"
-      is_spam = true;
-      break;
-    default:
-      continue;
-      break;
-    }
-    char *text = str_remove_first_chars(buf, is_spam ? 5 : 4);
-
-    ht_string_bool_node *ds_node = ht_node_create(text, is_spam, ht_string_bool_node);
-    ht_insert(dataset_table, ds_node);
-
-    da_float_ptr tokens;
-    da_init(&tokens, 32, float *);
-
-    extract_token_words(text, stop_words, {
-        add_tokens_to_table(token_table, &tokens, str_lwr(buf));
-      });
-
-
-    if(tokens.size > 0) {
-      item *new_item = malloc(sizeof(struct item));
-      new_item->is_spam = is_spam;
-
-      ht_string_item_node *item_node = ht_node_create(text, new_item, ht_string_item_node);
-
-      da_to_array(&tokens, item_node->value->tokens, float *); // Store static NULL-terminating array of tokens.
-      da_free_da_alone(&tokens);
-
-      ht_insert(items_table, item_node);
-    } else {
-      da_free(&tokens);
-    }
-  }
-
-  fclose(file);
-}
-
 // ---------- Main program  ----------
 
+/*
 void free_item(void *value) {
   item *itm = (item *)value;
   assert(itm);
@@ -252,19 +193,18 @@ void free_item(void *value) {
   free(itm->tokens);
   free(itm);
 }
+*/
 
-#define LEARNING_RATE 0.01
-#define EPOCHS 10000
-#define MAX_TOKENS_COUNT 7240 // Actual max value is 7205
-#define MAX_TOKENS_LENGTH 24  // Actual max value ia 16
-#define TRAIN_TEST_SPLIT 75   // Percent of data to train. Rest will be used for testing.
-
+/*
 typedef struct model {
+  size_t vocabulary_size;
+  char vocabulary[VOCABULARY_SIZE];
   float weights[MAX_TOKENS_LENGTH];
   float bias;
   char tok_str[MAX_TOKENS_COUNT][SMALL_BUFFER_SIZE];
   float tok_val[MAX_TOKENS_COUNT];
 } model;
+
 
 void load_model(model *m, const char *path) {
   FILE *file = fopen(path, "rb");
@@ -292,10 +232,12 @@ void load_model(model *m, const char *path) {
 
   fclose(file);
 }
+*/
 
 /*
  * Dump the model into a file.
  */
+/*
 void dump_model(model *m, const char *path) {
   FILE *file = fopen(path, "wb");
   if (!file) {
@@ -323,6 +265,7 @@ void dump_model(model *m, const char *path) {
   printf("Model saved to %s\n", path);
   fclose(file);
 }
+*/
 
 float sigmoidf(float x) {
   return 1.0f / (1.0f + expf(-x));
@@ -344,26 +287,124 @@ void print_help(char *prog) {
   printf("  -i, --input     Input string for the model.\n");
 }
 
+/*
+void free_vocabulary_data(void *value) {
+  vocabulary_data *itm = (vocabulary_data *)value;
+  assert(itm);
+  free(itm);
+}
+*/
+
 void train_model(char *dataset, char *output) {
+  /*
   model m;
   ht_string token_value_table, classification_table, items_table;
   ht_init(&token_value_table, 128, ht_string_float_node);
   ht_init(&classification_table, 256, ht_string_bool_node);
   ht_init(&items_table, 256, ht_string_item_node);
+  */
 
-  da_string stop_words;
-  da_init(&stop_words, 128, char *);
+  // Building the Vocabulary
+  char **stop_words = NULL;
   get_stop_words(&stop_words);
 
-  load_csv_dataset(dataset, &classification_table, &token_value_table, &items_table, &stop_words);
+  FILE *file;
+  char buf[BIG_BUFFER_SIZE];
 
-  da_free(&stop_words);
+  file = fopen(dataset, "r");
+  if (file == NULL) {
+    perror("Error opening file");
+    exit(1);
+  }
 
-  // Normalize token values between 0-1
-  ht_foreach(token_value_table, ht_string_float_node, {
-      current->value = current->value / (float)token_value_table.size;
-    });
+  item *items = NULL;
+  size_t vocabulary_i = 0;
 
+  struct { char *key; vocabulary_data value; } *vocabulary_table = NULL;
+
+  while (fgets(buf, BIG_BUFFER_SIZE, file) != NULL) {
+    buf[strlen(buf) - 1] = '\0';
+    bool is_spam = true;
+    switch(buf[0]) {
+    case 'h': // "ham"
+      is_spam = false;
+      break;
+    case 's': // "spam"
+      is_spam = true;
+      break;
+    default:
+      continue;
+      break;
+    }
+
+    item itm;
+    for (int i = 0; i < VOCABULARY_SIZE; i++) {
+      itm.values[i] = 0.0f;
+    }
+
+    char *processed_text = str_lwr(str_remove_first_chars(buf, is_spam ? 5 : 4));
+    itm.text = strdup(processed_text);
+    itm.is_spam = is_spam;
+    arrput(items, itm);
+
+    extract_token_words(processed_text, &stop_words, {
+        ptrdiff_t index = shgeti(vocabulary_table, buf);
+        if (index == -1) {
+          vocabulary_data data;
+          data.index = vocabulary_i;
+          data.count = 1;
+
+          vocabulary_i++;
+          shput(vocabulary_table, buf, data);
+        } else {
+          vocabulary_table[index].value.count += 1;
+        }
+      });
+  }
+  fclose(file);
+
+  // Calculate Term Frequency (TF)
+  for (size_t i = 0; i < arrlen(items); ++i) {
+    size_t total_terms = 0;
+    extract_token_words(items[i].text, &stop_words, {
+        ptrdiff_t index = shgeti(vocabulary_table, buf);
+        assert(index != -1);
+        assert(vocabulary_table[index].value.index <= VOCABULARY_SIZE);
+        items[i].values[vocabulary_table[index].value.index] += 1.0f;
+        total_terms++;
+      });
+
+    for (size_t j = 0; j < VOCABULARY_SIZE; ++j) {
+      if (items[i].values[j] > 0.0f) {
+        items[i].values[j] /= (float)total_terms;
+      }
+    }
+  }
+
+  // Multiply by Inverse Document Frequency (IDF)
+  for(size_t i = 0; i < arrlen(items); ++i) {
+    extract_token_words(items[i].text, &stop_words, {
+        ptrdiff_t index = shgeti(vocabulary_table, buf);
+        assert(index != -1);
+        assert(vocabulary_table[index].value.index <= VOCABULARY_SIZE);
+
+        float idf = logf((float)arrlen(items) / (1 + vocabulary_table[index].value.count));
+        items[i].values[vocabulary_table[index].value.index] *= idf;
+      });
+  }
+
+  shfree(vocabulary_table);
+
+  for (size_t i = 0; i < arrlen(items); i++) {
+    free(items[i].text);
+  }
+  arrfree(items);
+
+  for (size_t i = 0; i < arrlenu(stop_words); ++i) {
+    free(stop_words[i]);
+  }
+  arrfree(stop_words);
+  /*
   // Initialize weights and bias
   for(size_t i = 0; i < MAX_TOKENS_LENGTH; ++i)
     m.weights[i] = 0.0f;
@@ -371,7 +412,7 @@ void train_model(char *dataset, char *output) {
 
   size_t correctly_predicted;
   const size_t train_size = TRAIN_TEST_SPLIT * ((float)items_table.size / 100.0f);
-  const size_t test_size = items_table.size - train_size;
+  const size_t test_size = items_table.size - vocabulary_i;
 
   for(size_t x = 1; x <= EPOCHS; ++x) {
     correctly_predicted = 0;
@@ -420,8 +461,10 @@ void train_model(char *dataset, char *output) {
   ht_free(&token_value_table, ht_string_float_node);
   ht_free(&classification_table, ht_string_bool_node);
   ht_free2(&items_table, ht_string_item_node, free_item);
+  */
 }
 
+/*
 void run_model(char *path, char *input) {
   bool should_free = false;
   if(input == NULL) {
@@ -485,6 +528,7 @@ void run_model(char *path, char *input) {
   da_free_da_alone(&tokens);
   ht_free(&token_value_table, ht_string_float_node);
 }
+*/
 
 enum action {
   UNKNOWN,
@@ -496,7 +540,7 @@ enum action {
 int main(int argc, char *argv[]) {
   char *dataset = "dataset/spam.csv";
   char *model = "model.bin";
-  char *input = NULL;
+  // char *input = NULL;
   enum action a = UNKNOWN;
 
   if (argc > 1) {
@@ -522,7 +566,7 @@ int main(int argc, char *argv[]) {
         }
       } else if (strcmp(argv[x], "-i") == 0 || strcmp(argv[x], "--input") == 0) {
         if(x+1 < argc && argv[x+1][0] != '-') {
-          input = argv[x+1];
+          // input = argv[x+1];
         }
       }
     }
@@ -536,7 +580,7 @@ int main(int argc, char *argv[]) {
     train_model(dataset, model);
     break;
   case RUN:
-    run_model(model, input);
+    // run_model(model, input);
     break;
   default:
     printf("Usage: %s [OPTION]...\n", argv[0]);
