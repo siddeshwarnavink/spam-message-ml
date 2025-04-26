@@ -18,31 +18,12 @@
 
 #define VOCABULARY_SIZE 33643 // No. of unique tokens in dataset.
 #define LEARNING_RATE 0.01
-#define EPOCHS 10
-#define TRAIN_TEST_SPLIT 75   // Percent of data to train. Rest will be used for testing.
+#define LAMBDA 0.01
+#define EPOCHS 100
+#define TRAIN_TEST_SPLIT 80   // Percent of data to train. Rest will be used for testing.
 
-/*
-#define MAX_TOKENS_COUNT 7240 // Actual max value is 7205
-#define MAX_TOKENS_LENGTH 24  // Actual max value ia 16
-*/
-
-typedef struct ht_string_uint_node {
-  char *key;
-  size_t value;
-  struct ht_string_uint_node *next;
-} ht_string_uint_node;
-
-typedef struct ht_string_float_node {
-  char *key;
-  float value;
-  struct ht_string_float_node *next;
-} ht_string_float_node;
-
-typedef struct ht_string_bool_node {
-  char *key;
-  bool value;
-  struct ht_string_bool_node *next;
-} ht_string_bool_node;
+#define HAM_WEIGHT 0.5774
+#define SPAM_WEIGHT 3.7296
 
 typedef struct item {
   char *text;
@@ -50,32 +31,10 @@ typedef struct item {
   float values[VOCABULARY_SIZE];
 } item;
 
-/*
-typedef struct {
-  item **array;
-  size_t size;
-  size_t capacity;
-} da_item;
-
-typedef struct ht_string_item_node {
-  char *key;
-  item *value;
-  struct ht_string_item_node *next;
-} ht_string_item_node;
-*/
-
 typedef struct vocabulary_data {
   size_t index;
   size_t count;
 } vocabulary_data;
-
-/*
-typedef struct ht_string_vocabulary_data_node {
-  char *key;
-  vocabulary_data *value;
-  struct ht_string_vocabulary_data_node *next;
-} ht_string_vocabulary_data_node;
-*/
 
 // ---------- String functions ----------
 
@@ -185,15 +144,11 @@ bool accept_string(char ***stop_words, char *str) {
 
 // ---------- Main program  ----------
 
-/*
-void free_item(void *value) {
-  item *itm = (item *)value;
-  assert(itm);
-  assert(itm->tokens);
-  free(itm->tokens);
-  free(itm);
-}
-*/
+
+typedef struct model {
+  float weights[VOCABULARY_SIZE];
+  float bias;
+} model;
 
 /*
 typedef struct model {
@@ -237,7 +192,7 @@ void load_model(model *m, const char *path) {
 /*
  * Dump the model into a file.
  */
-/*
+
 void dump_model(model *m, const char *path) {
   FILE *file = fopen(path, "wb");
   if (!file) {
@@ -245,27 +200,21 @@ void dump_model(model *m, const char *path) {
     exit(EXIT_FAILURE);
   }
 
-  if (fwrite(m->tok_str, sizeof(char), MAX_TOKENS_COUNT * SMALL_BUFFER_SIZE, file) != MAX_TOKENS_COUNT * SMALL_BUFFER_SIZE) {
-    perror("Failed to write token strings");
-    exit(EXIT_FAILURE);
-  }
-  if (fwrite(m->tok_val, sizeof(float), MAX_TOKENS_COUNT, file) != MAX_TOKENS_COUNT) {
-    perror("Failed to write token values");
-    exit(EXIT_FAILURE);
-  }
-  if (fwrite(m->weights, sizeof(float), MAX_TOKENS_LENGTH, file) != MAX_TOKENS_LENGTH) {
+  if (fwrite(m->weights, sizeof(float), VOCABULARY_SIZE, file) != VOCABULARY_SIZE) {
     perror("Failed to write weights");
+    fclose(file);
     exit(EXIT_FAILURE);
   }
+
   if (fwrite(&m->bias, sizeof(float), 1, file) != 1) {
     perror("Failed to write bias");
+    fclose(file);
     exit(EXIT_FAILURE);
   }
 
   printf("Model saved to %s\n", path);
   fclose(file);
 }
-*/
 
 float sigmoidf(float x) {
   return 1.0f / (1.0f + expf(-x));
@@ -287,23 +236,7 @@ void print_help(char *prog) {
   printf("  -i, --input     Input string for the model.\n");
 }
 
-/*
-void free_vocabulary_data(void *value) {
-  vocabulary_data *itm = (vocabulary_data *)value;
-  assert(itm);
-  free(itm);
-}
-*/
-
 void train_model(char *dataset, char *output) {
-  /*
-  model m;
-  ht_string token_value_table, classification_table, items_table;
-  ht_init(&token_value_table, 128, ht_string_float_node);
-  ht_init(&classification_table, 256, ht_string_bool_node);
-  ht_init(&items_table, 256, ht_string_item_node);
-  */
-
   // Building the Vocabulary
   char **stop_words = NULL;
   get_stop_words(&stop_words);
@@ -393,6 +326,61 @@ void train_model(char *dataset, char *output) {
       });
   }
 
+  // Training the model
+  model m;
+  for(size_t i = 0; i < VOCABULARY_SIZE; ++i)
+    m.weights[i] = 0.0f;
+  m.bias = 0.0f;
+
+  size_t true_positives = 0, false_positives = 0, false_negatives = 0;
+  const size_t train_size = TRAIN_TEST_SPLIT * ((float)arrlen(items) / 100.0f);
+
+  for(size_t x = 1; x <= EPOCHS; ++x) {
+    for(size_t i = 0; i < arrlen(items); ++i) {
+      float z = 0.0f;
+      for(size_t j = 0; j < VOCABULARY_SIZE; ++j)
+        z += items[i].values[j] * m.weights[j];
+      z += m.bias;
+
+      float y_cap = sigmoidf(z); // Classification predicted by the model.
+      float y = items[i].is_spam ? 1.0f : 0.0f; // Actual value.
+
+      if (i < train_size) { // Train
+        float gradient_weight = items[i].is_spam ? SPAM_WEIGHT : HAM_WEIGHT;
+        float bias_gradient = gradient_weight * (y_cap - y);
+
+        for(size_t j = 0; j < VOCABULARY_SIZE; ++j) {
+          float weight_gradient = bias_gradient * items[i].values[j];
+          m.weights[j] -= LEARNING_RATE * (weight_gradient + LAMBDA * m.weights[j]);
+        }
+        m.bias -= LEARNING_RATE * bias_gradient;
+      } else {
+        if (items[i].is_spam && y_cap > 0.5f) {
+          ++true_positives;
+        } else if (!items[i].is_spam && y_cap > 0.5f) {
+          ++false_positives;
+        } else if (items[i].is_spam && y_cap <= 0.5f) {
+          ++false_negatives;
+        }
+      }
+    }
+  }
+
+  float precision = (true_positives + false_positives > 0) ?
+    (float)true_positives / (true_positives + false_positives) : 0.0f;
+  float recall = (true_positives + false_negatives > 0) ?
+    (float)true_positives / (true_positives + false_negatives) : 0.0f;
+  float f1_score = (precision + recall > 0) ?
+    2.0f * (precision * recall) / (precision + recall) : 0.0f;
+
+  printf("Precision: %.2f%%\n", precision * 100.0f);
+  printf("Recall: %.2f%%\n", recall * 100.0f);
+  printf("F1-Score: %.2f%%\n", f1_score * 100.0f);
+
+  if(output != NULL) {
+    dump_model(&m, output);
+  }
+
   shfree(vocabulary_table);
 
   for (size_t i = 0; i < arrlen(items); i++) {
@@ -404,64 +392,6 @@ void train_model(char *dataset, char *output) {
     free(stop_words[i]);
   }
   arrfree(stop_words);
-  /*
-  // Initialize weights and bias
-  for(size_t i = 0; i < MAX_TOKENS_LENGTH; ++i)
-    m.weights[i] = 0.0f;
-  m.bias = 0.0f;
-
-  size_t correctly_predicted;
-  const size_t train_size = TRAIN_TEST_SPLIT * ((float)items_table.size / 100.0f);
-  const size_t test_size = items_table.size - vocabulary_i;
-
-  for(size_t x = 1; x <= EPOCHS; ++x) {
-    correctly_predicted = 0;
-    ht_foreach(items_table, ht_string_item_node, {
-        item *itm = current->value;
-        float z = 0.0f;
-        for(size_t i = 0; itm->tokens[i] != NULL; ++i)
-          z += (*itm->tokens[i]) * m.weights[i];
-        z += m.bias;
-
-        float y_cap = sigmoidf(z); // Classification predicted by the model.
-        float y = itm->is_spam ? 1.0f : 0.0f; // Actual value.
-
-        if(x <= train_size) {
-          float bias_gradient = y_cap - y;
-          for(size_t i = 0; itm->tokens[i] != NULL; ++i) {
-            float weight_gradient = bias_gradient * *itm->tokens[i];
-            m.weights[i] -= LEARNING_RATE * weight_gradient;
-          }
-          m.bias -= LEARNING_RATE * bias_gradient;
-        } else if((itm->is_spam && y_cap > 0.5f) || (!itm->is_spam && y_cap < 0.5f)) {
-          ++correctly_predicted;
-        }
-      });
-  }
-
-  const float accuracy = (float)correctly_predicted / (float)items_table.size * 100.0f;
-  printf("Train size: %zu\n", train_size);
-  printf("Test size: %zu\n", test_size);
-  printf("Correctly Predicted: %zu\n", correctly_predicted);
-  printf("Accuracy: %f\n", accuracy);
-
-  // Dump model to file
-  if(output != NULL) {
-    // Copy token values.
-    size_t j = 0;
-    ht_foreach(token_value_table, ht_string_float_node, {
-        strncpy(m.tok_str[j], current->key, SMALL_BUFFER_SIZE);
-        m.tok_val[j] = current->value;
-        ++j;
-      });
-
-    dump_model(&m, output);
-  }
-
-  ht_free(&token_value_table, ht_string_float_node);
-  ht_free(&classification_table, ht_string_bool_node);
-  ht_free2(&items_table, ht_string_item_node, free_item);
-  */
 }
 
 /*

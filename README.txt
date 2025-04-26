@@ -3,6 +3,14 @@ Spam Message Detection
 
 Implementing Logistic Regression From Scratch for Spam Detection.
 
+Model Output
+========
+
+	Precision: 80.27%
+	Recall: 87.93%
+	F1-Score: 83.93%
+	Model saved to model.bin
+
 Dataset
 =========
 
