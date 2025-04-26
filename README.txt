@@ -6,9 +6,9 @@ Implementing Logistic Regression From Scratch for Spam Detection.
 Model Output
 ========
 
-	Precision: 80.27%
-	Recall: 87.93%
-	F1-Score: 83.93%
+	Precision: 87.20%
+	Recall: 80.09%
+	F1-Score: 83.49%
 	Model saved to model.bin
 
 Dataset

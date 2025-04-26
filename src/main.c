@@ -13,14 +13,14 @@
 
 // ---------- Configuration ----------
 
-#define SMALL_BUFFER_SIZE 64
-#define BIG_BUFFER_SIZE 256
+#define SMALL_BUFFER_SIZE 256
+#define BUFFER_SIZE 1024
 
-#define VOCABULARY_SIZE 33643 // No. of unique tokens in dataset.
-#define LEARNING_RATE 0.01
+#define VOCABULARY_SIZE 8123 // No. of unique tokens in dataset.
+#define LEARNING_RATE 0.001
 #define LAMBDA 0.01
-#define EPOCHS 100
-#define TRAIN_TEST_SPLIT 80   // Percent of data to train. Rest will be used for testing.
+#define EPOCHS 5
+#define TRAIN_TEST_SPLIT 70   // Percent of data to train. Rest will be used for testing.
 
 #define HAM_WEIGHT 0.5774
 #define SPAM_WEIGHT 3.7296
@@ -109,9 +109,9 @@ bool accept_string(char ***stop_words, char *str) {
  * perform action for each word.
  */
 #define extract_token_words(input, stop_words, body) do {               \
-    char buf[SMALL_BUFFER_SIZE];                                        \
+    char buf[BUFFER_SIZE];                                              \
     size_t extract_token_words_j = 0;                                   \
-    for (size_t extract_token_words_i = 0; extract_token_words_i < strlen(input) && extract_token_words_j < SMALL_BUFFER_SIZE - 1; ++extract_token_words_i) { \
+    for (size_t extract_token_words_i = 0; extract_token_words_i < strlen(input) && extract_token_words_j < BUFFER_SIZE - 1; ++extract_token_words_i) { \
       switch(input[extract_token_words_i]) {                            \
       case '.':                                                         \
       case ',':                                                         \
@@ -144,22 +144,12 @@ bool accept_string(char ***stop_words, char *str) {
 
 // ---------- Main program  ----------
 
-
 typedef struct model {
   float weights[VOCABULARY_SIZE];
   float bias;
+  float idf[VOCABULARY_SIZE];
+  char vocabulary[VOCABULARY_SIZE][16];
 } model;
-
-/*
-typedef struct model {
-  size_t vocabulary_size;
-  char vocabulary[VOCABULARY_SIZE];
-  float weights[MAX_TOKENS_LENGTH];
-  float bias;
-  char tok_str[MAX_TOKENS_COUNT][SMALL_BUFFER_SIZE];
-  float tok_val[MAX_TOKENS_COUNT];
-} model;
-
 
 void load_model(model *m, const char *path) {
   FILE *file = fopen(path, "rb");
@@ -168,31 +158,33 @@ void load_model(model *m, const char *path) {
     exit(EXIT_FAILURE);
   }
 
-  if (fread(m->tok_str, sizeof(char), MAX_TOKENS_COUNT * SMALL_BUFFER_SIZE, file) != MAX_TOKENS_COUNT * SMALL_BUFFER_SIZE) {
-    perror("Failed to read token strings");
-    exit(EXIT_FAILURE);
-  }
-  if (fread(m->tok_val, sizeof(float), MAX_TOKENS_COUNT, file) != MAX_TOKENS_COUNT) {
-    perror("Failed to read token values");
-    exit(EXIT_FAILURE);
-  }
-  if (fread(m->weights, sizeof(float), MAX_TOKENS_LENGTH, file) != MAX_TOKENS_LENGTH) {
-    perror("Failed to read weights");
+  if (fread(m->weights, sizeof(float), VOCABULARY_SIZE, file) != VOCABULARY_SIZE) {
+    perror("Failed to read model weights.");
     exit(EXIT_FAILURE);
   }
   if (fread(&m->bias, sizeof(float), 1, file) != 1) {
-    perror("Failed to read bias");
+    perror("Failed to read model bias.");
     exit(EXIT_FAILURE);
+  }
+  if (fread(m->idf, sizeof(float), VOCABULARY_SIZE, file) != VOCABULARY_SIZE) {
+    perror("Failed to read model IDF.");
+    exit(EXIT_FAILURE);
+  }
+  for (size_t i = 0; i < VOCABULARY_SIZE; ++i) {
+    if (fread(m->vocabulary[i], sizeof(char), 16, file) != 16) {
+      perror("Failed to read vocabulary.");
+      fclose(file);
+      exit(EXIT_FAILURE);
+    }
+    m->vocabulary[i][15] = '\0';
   }
 
   fclose(file);
 }
-*/
 
 /*
  * Dump the model into a file.
  */
-
 void dump_model(model *m, const char *path) {
   FILE *file = fopen(path, "wb");
   if (!file) {
@@ -205,11 +197,22 @@ void dump_model(model *m, const char *path) {
     fclose(file);
     exit(EXIT_FAILURE);
   }
-
   if (fwrite(&m->bias, sizeof(float), 1, file) != 1) {
     perror("Failed to write bias");
     fclose(file);
     exit(EXIT_FAILURE);
+  }
+  if (fwrite(m->idf, sizeof(float), VOCABULARY_SIZE, file) != VOCABULARY_SIZE) {
+    perror("Failed to write IDF");
+    fclose(file);
+    exit(EXIT_FAILURE);
+  }
+  for (size_t i = 0; i < VOCABULARY_SIZE; ++i) {
+    if (fwrite(m->vocabulary[i], sizeof(char), 16, file) != 16) {
+      perror("Failed to write vocabulary");
+      fclose(file);
+      exit(EXIT_FAILURE);
+    }
   }
 
   printf("Model saved to %s\n", path);
@@ -242,7 +245,7 @@ void train_model(char *dataset, char *output) {
   get_stop_words(&stop_words);
 
   FILE *file;
-  char buf[BIG_BUFFER_SIZE];
+  char buf[BUFFER_SIZE];
 
   file = fopen(dataset, "r");
   if (file == NULL) {
@@ -250,12 +253,15 @@ void train_model(char *dataset, char *output) {
     exit(1);
   }
 
+  model m;
+
   item *items = NULL;
   size_t vocabulary_i = 0;
 
   struct { char *key; vocabulary_data value; } *vocabulary_table = NULL;
 
-  while (fgets(buf, BIG_BUFFER_SIZE, file) != NULL) {
+  fgets(buf, BUFFER_SIZE, file);
+  while (fgets(buf, BUFFER_SIZE, file) != NULL) {
     buf[strlen(buf) - 1] = '\0';
     bool is_spam = true;
     switch(buf[0]) {
@@ -266,13 +272,14 @@ void train_model(char *dataset, char *output) {
       is_spam = true;
       break;
     default:
-      continue;
+      assert(0);
       break;
     }
 
     item itm;
     for (int i = 0; i < VOCABULARY_SIZE; i++) {
       itm.values[i] = 0.0f;
+      m.idf[i] = 0.0f;
     }
 
     char *processed_text = str_lwr(str_remove_first_chars(buf, is_spam ? 5 : 4));
@@ -287,6 +294,9 @@ void train_model(char *dataset, char *output) {
           data.index = vocabulary_i;
           data.count = 1;
 
+          strncpy(m.vocabulary[vocabulary_i], buf, 15);
+          m.vocabulary[vocabulary_i][15] = '\0';
+
           vocabulary_i++;
           shput(vocabulary_table, buf, data);
         } else {
@@ -296,12 +306,21 @@ void train_model(char *dataset, char *output) {
   }
   fclose(file);
 
+  if (vocabulary_i > VOCABULARY_SIZE) {
+    fprintf(stderr, "Error: Vocabulary size exceeded.\n");
+    exit(1);
+  }
+
   // Calculate Term Frequency (TF)
   for (size_t i = 0; i < arrlen(items); ++i) {
     size_t total_terms = 0;
     extract_token_words(items[i].text, &stop_words, {
         ptrdiff_t index = shgeti(vocabulary_table, buf);
         assert(index != -1);
+        if (index == -1) {
+          printf("Token not found in vocabulary: %s\n", buf);
+          continue;
+        }
         assert(vocabulary_table[index].value.index <= VOCABULARY_SIZE);
         items[i].values[vocabulary_table[index].value.index] += 1.0f;
         total_terms++;
@@ -311,6 +330,11 @@ void train_model(char *dataset, char *output) {
       if (items[i].values[j] > 0.0f) {
         items[i].values[j] /= (float)total_terms;
       }
+    }
+
+    if (total_terms == 0) {
+      fprintf(stderr, "Warning: No valid tokens in message.\n");
+      continue;
     }
   }
 
@@ -322,12 +346,14 @@ void train_model(char *dataset, char *output) {
         assert(vocabulary_table[index].value.index <= VOCABULARY_SIZE);
 
         float idf = logf((float)arrlen(items) / (1 + vocabulary_table[index].value.count));
+        if(idf > 0.0f) {
+          m.idf[index] = idf;
+        }
         items[i].values[vocabulary_table[index].value.index] *= idf;
       });
   }
 
   // Training the model
-  model m;
   for(size_t i = 0; i < VOCABULARY_SIZE; ++i)
     m.weights[i] = 0.0f;
   m.bias = 0.0f;
@@ -394,7 +420,6 @@ void train_model(char *dataset, char *output) {
   arrfree(stop_words);
 }
 
-/*
 void run_model(char *path, char *input) {
   bool should_free = false;
   if(input == NULL) {
@@ -415,50 +440,60 @@ void run_model(char *path, char *input) {
     should_free = true;
   }
 
-  da_string stop_words;
-  da_init(&stop_words, 128, char *);
+  char **stop_words = NULL;
   get_stop_words(&stop_words);
 
   model m;
   load_model(&m, path);
 
-  da_float_ptr tokens;
-  da_init(&tokens, 32, float *);
-
-  ht_string token_value_table;
-  ht_init(&token_value_table, 128, ht_string_float_node);
-
-  for(size_t i = 0; i < MAX_TOKENS_COUNT; ++i) {
-    ht_string_float_node *node = ht_node_create(m.tok_str[i], m.tok_val[i], ht_string_float_node);
-    ht_insert(&token_value_table, node);
+  // Calculate Term Frequency (TF)
+  struct { char *key; float value; } *vocabulary_count = NULL;
+  for(size_t i = 0; i < VOCABULARY_SIZE; ++i) {
+    shput(vocabulary_count, m.vocabulary[i], 0.0f);
   }
 
-  extract_token_words(input, &stop_words, {
-      float *token_value = (float *)ht_retrive(&token_value_table, str_lwr(buf), ht_string_float_node);
-      if(token_value != NULL) {
-        da_append(&tokens, token_value);
+  size_t total = 0;
+  extract_token_words(str_lwr(input), &stop_words, {
+      ptrdiff_t index = shgeti(vocabulary_count, buf);
+      if (index != -1) {
+        size_t current_value = vocabulary_count[index].value;
+        shput(vocabulary_count, buf, current_value + 1.0f);
+        total++;
       }
     });
 
+
+  for (size_t i = 0; i < shlenu(vocabulary_count); ++i) {
+    vocabulary_count[i].value /= (float)total;
+    vocabulary_count[i].value *= m.idf[i];
+  }
+
   float z = 0.0f;
-  for(size_t i = 0; i < tokens.size; ++i) {
-    z += *tokens.array[i] * m.weights[i];
+  for (size_t i = 0; i < shlenu(vocabulary_count); ++i) {
+    if (vocabulary_count[i].value > 0) {
+      size_t vocab_index = shget(vocabulary_count, m.vocabulary[i]);
+      z += vocabulary_count[i].value * m.weights[vocab_index];
+    }
   }
   z += m.bias;
+
   float y_cap = sigmoidf(z);
 
-  if(y_cap > 0.5) {
+  if(y_cap > 0.45f) {
     printf("It is spam.\n");
   } else {
     printf("It not a spam.\n");
   }
 
   if(should_free) free(input);
-  da_free(&stop_words);
-  da_free_da_alone(&tokens);
-  ht_free(&token_value_table, ht_string_float_node);
+
+  for (size_t i = 0; i < arrlenu(stop_words); ++i) {
+    free(stop_words[i]);
+  }
+  arrfree(stop_words);
+
+  shfree(vocabulary_count);
 }
-*/
 
 enum action {
   UNKNOWN,
@@ -470,7 +505,7 @@ enum action {
 int main(int argc, char *argv[]) {
   char *dataset = "dataset/spam.csv";
   char *model = "model.bin";
-  // char *input = NULL;
+  char *input = NULL;
   enum action a = UNKNOWN;
 
   if (argc > 1) {
@@ -496,7 +531,7 @@ int main(int argc, char *argv[]) {
         }
       } else if (strcmp(argv[x], "-i") == 0 || strcmp(argv[x], "--input") == 0) {
         if(x+1 < argc && argv[x+1][0] != '-') {
-          // input = argv[x+1];
+          input = argv[x+1];
         }
       }
     }
@@ -510,7 +545,7 @@ int main(int argc, char *argv[]) {
     train_model(dataset, model);
     break;
   case RUN:
-    // run_model(model, input);
+    run_model(model, input);
     break;
   default:
     printf("Usage: %s [OPTION]...\n", argv[0]);
